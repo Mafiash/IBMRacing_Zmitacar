@@ -436,220 +436,117 @@ def destringify(s):
         else:
             return [destringify(i) for i in s]
 
-def drive_example(c):
-    '''This is only an example. It will get around the track but the
-    correct thing to do is write your own `drive()` function.'''
-    S,R= c.S.d,c.R.d
-    target_speed=160
-
-    R['steer']= S['angle']*25 / PI
-    R['steer']-= S['trackPos']*.25
-
-    R['accel'] = max(0.0, min(1.0, R['accel']))
-    
-
-    if S['speedX'] < target_speed - (R['steer']*2.5):
-        R['accel']+= .4
-    else:
-        R['accel']-= .2
-    if S['speedX']<10:
-       R['accel']+= 1/(S['speedX']+.1)
-
-    if ((S['wheelSpinVel'][2]+S['wheelSpinVel'][3]) -
-       (S['wheelSpinVel'][0]+S['wheelSpinVel'][1]) > 2):
-       R['accel']-= 0.1
-
-
-
-    R['gear']=1
-    if S['speedX']>60:
-        R['gear']=2
-    if S['speedX']>100:
-        R['gear']=3
-    if S['speedX']>140:
-        R['gear']=4
-    if S['speedX']>190:
-        R['gear']=5
-    if S['speedX']>220:
-        R['gear']=6
-    return
-
-
-
-
-#############################################
-# MODULAR DRIVE LOGIC WITH USER PARAMETERS  #
-#############################################
-
 import math
 
-# ================= USER CONFIGURABLE PARAMETERS =================
-# --- Speed control (now driven by visible track distance) ---
-# --- Speed control ---
-MAX_SPEED = 120
-MIN_SPEED = 60
-FULL_THROTTLE_DIST = 100
-BRAKE_DIST = 70
-HARD_BRAKE_DIST = 40
+_prev_target = 100.0
 
-# --- Steering (Target Point Tracking) ---
-STEER_GAIN = 0.5
-HEADING_GAIN = 15.0
-EDGE_SAFETY_GAIN = 0.7
-EDGE_SAFETY_POS = 0.5
-
-# --- Misc ---
-GEAR_SPEEDS = [0, 20, 40, 80, 100, 180]  # Speed thresholds for gear shifting.
-ENABLE_TRACTION_CONTROL = True            # Toggle traction control system.
-
-# The rangefinder angles (in DEGREES) requested in Client.setup_connection().
-# Index 9 (value 0) points straight ahead. Keep this in sync with that string.
-TRACK_SENSOR_ANGLES_DEG = [-45, -19, -12, -7, -4, -2.5, -1.7, -1, -0.5,
-                           0,
-                           0.5, 1, 1.7, 2.5, 4, 7, 12, 19, 45]
-
-
-# ================= HELPER FUNCTIONS =================
-def find_target_ray(S):
-    """Target Identification.
-
-    Scans the 19 rangefinder rays in S['track'] and returns a tuple:
-        (best_index, best_distance, best_angle_rad)
-    where best_angle_rad is the physical angle of the longest ray relative to
-    the car's nose (negative = left, positive = right), derived from the
-    actual sensor layout in TRACK_SENSOR_ANGLES_DEG.
-    """
-    track = S['track']
-
-    # When all wheels are off-track TORCS reports -1 for every ray.
-    # In that case there is no meaningful target, so fall back to straight ahead.
-    if not track or max(track) <= 0:
-        return len(track) // 2 if track else 9, 0.0, 0.0
-
-    best_index = max(range(len(track)), key=lambda i: track[i])
-    best_distance = track[best_index]
-
-    # Map the winning ray index to its physical angle (radians).
-    if best_index < len(TRACK_SENSOR_ANGLES_DEG):
-        best_angle_rad = math.radians(TRACK_SENSOR_ANGLES_DEG[best_index])
-    else:
-        # Fallback: assume a symmetric -90..+90 spread if the layout changes.
-        span = math.pi  # 180 degrees total
-        best_angle_rad = -span / 2 + best_index * (span / (len(track) - 1))
-
-    return best_index, best_distance, best_angle_rad
-
-
-def calculate_steering(S, target_angle_rad):
-    """Steering via Target Point Tracking.
-
-    Instead of merely centering the car, we aim the nose at the furthest
-    visible point on the track. Two terms are combined:
-      * HEADING_GAIN * S['angle']      -> keep aligned with the track axis
-      * STEER_GAIN   * target_angle    -> steer toward the deepest visible ray
-    A small edge-safety term only engages when we drift close to the boundary,
-    preventing the racing line from running off the track.
-    """
-    # Heading correction + aim at the furthest point.
-    steer = (HEADING_GAIN * S['angle'] / math.pi) + (STEER_GAIN * target_angle_rad / (math.pi / 2))
-
-    # Safety net: only pull back toward center when hugging an edge.
-    if abs(S['trackPos']) > EDGE_SAFETY_POS:
-        steer -= EDGE_SAFETY_GAIN * S['trackPos']
-
-    return max(-1.0, min(1.0, steer))
-
-
-def calculate_throttle(S, target_distance):
-    """Dynamic, distance-proportional throttle.
-
-    Throttle is governed by how far we can see down the track:
-      * target_distance >= FULL_THROTTLE_DIST -> aim for MAX_SPEED (full throttle)
-      * shorter visible distance              -> linearly lower target speed
-    The accelerator is then a proportional controller toward that target speed.
-    """
-    # Convert visible distance into a desired speed.
-    if target_distance >= FULL_THROTTLE_DIST:
-        target_speed = MAX_SPEED
-    else:
-        # Linearly scale target speed between MIN_SPEED and MAX_SPEED.
-        ratio = max(0.0, target_distance) / FULL_THROTTLE_DIST
-        target_speed = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * ratio
-
-    # Proportional speed controller.
-    speed_error = target_speed - S['speedX']
-    accel = speed_error / 30.0  # scale factor; larger denominator = gentler accel
-
-    # Strong push to get the car moving from a standstill.
-    if S['speedX'] < 10:
-        accel += 1.0 / (S['speedX'] + 0.1)
-
-    return max(0.0, min(1.0, accel))
-
-
-def apply_brakes(S, target_distance):
-    """Dynamic, distance-proportional braking.
-
-    When the furthest visible point suddenly gets closer (a corner ahead),
-    we brake — gently as we approach BRAKE_DIST, and hard below HARD_BRAKE_DIST.
-    No braking is applied while the track ahead is open.
-    """
-    if target_distance >= BRAKE_DIST:
-        return 0.0
-
-    if target_distance <= HARD_BRAKE_DIST:
-        # Aggressive braking right before a tight corner.
-        # Only brake hard if we are actually carrying speed.
-        return 0.8 if S['speedX'] > MIN_SPEED else 0.0
-
-    # Between HARD_BRAKE_DIST and BRAKE_DIST: scale braking with how close the
-    # corner is (closer -> more brake).
-    span = BRAKE_DIST - HARD_BRAKE_DIST
-    closeness = (BRAKE_DIST - target_distance) / span  # 0..1
-    brake = 0.6 * closeness
-
-    # Don't fight the engine: only brake meaningfully if we're going fast enough.
-    return brake if S['speedX'] > MIN_SPEED else 0.0
-
-
-def shift_gears(S):
-    gear = 1
-    for i, speed in enumerate(GEAR_SPEEDS):
-        if S['speedX'] > speed:
-            gear = i + 1
-    return min(gear, 6)
-
-
-def traction_control(S, accel):
-    if ENABLE_TRACTION_CONTROL:
-        if ((S['wheelSpinVel'][2] + S['wheelSpinVel'][3]) - (S['wheelSpinVel'][0] + S['wheelSpinVel'][1])) > 2:
-            accel -= 0.1
-    return max(0.0, accel)
-
-# ================= MAIN DRIVE FUNCTION =================
-def drive_modular(c):
+def drive(c):
+    global _prev_target
     S, R = c.S.d, c.R.d
 
-    # --- Target Identification: deepest visible point on the track ---
-    _, target_distance, target_angle_rad = find_target_ray(S)
+    speed = S['speedX']
+    angle = S['angle']
+    track_pos = S['trackPos']
+    track = S['track']
+    rpm = S['rpm']
+    gear = int(S['gear'])
+    wheels = S['wheelSpinVel']
 
-    # --- Apply the Target-Point-Tracking controllers ---
-    R['steer'] = calculate_steering(S, target_angle_rad)
-    R['accel'] = calculate_throttle(S, target_distance)
-    R['brake'] = apply_brakes(S, target_distance)
+    # ── LOOK-AHEAD SPEED ────────
+    longest_ray = max(track)
 
-    # If we're braking, don't also accelerate.
-    if R['brake'] > 0.0:
+    front_cone = max(track[7:12])
+
+    MAX_SPEED = 300.0
+    MIN_SPEED = 75.0
+
+    t_longest = max(MIN_SPEED, min(MAX_SPEED, 24.0 * math.sqrt(longest_ray)))
+    t_front = max(MIN_SPEED, min(MAX_SPEED, 19.0 * math.sqrt(front_cone)))
+
+    raw_target = min(t_longest, t_front)
+
+    # ── SMOOTH SPEED FILTER ──
+    if raw_target < _prev_target:
+        target = (0.4 * _prev_target) + (0.6 * raw_target)
+    else:
+        target = (0.85 * _prev_target) + (0.15 * raw_target)
+
+    _prev_target = target
+
+    # ── STEERING ───────────
+    best_index = max(range(len(track)), key=lambda i: track[i])
+
+    target_pos = (9 - best_index) / 9.0
+
+    APEX_CUT = 1.6
+    target_pos *= APEX_CUT
+
+    target_pos = max(-0.95, min(0.95, target_pos))
+
+    pos_error = track_pos - target_pos
+
+    raw_steer = (angle * 4.0 / math.pi) - (pos_error * 0.70)
+
+    prev_steer = R.get('steer', 0.0)
+    smooth_steer = (0.7 * raw_steer) + (0.3 * prev_steer)
+    R['steer'] = max(-1.0, min(1.0, smooth_steer))
+
+    # ── F1-STYLE THROTTLE / BRAKE ────────────────────────────
+    if speed < target - 2:
+        R['accel'] = 1.0
+        R['brake'] = 0.0
+    elif speed > target + 3:
+        R['accel'] = 0.0
+        R['brake'] = 1.0
+    else:
+        R['accel'] = 0.0
+        R['brake'] = 0.0
+
+    if speed < 10:
+        R['accel'] = 1.0
+        R['brake'] = 0.0
+
+    # ── TRAIL BRAKING (understeer fix) ───────────────────────
+    if abs(angle) > 0.3 and abs(R['steer']) > 0.8 and speed > 25:
+        R['brake'] = max(R['brake'], 0.15)
         R['accel'] = 0.0
 
-    R['accel'] = traction_control(S, R['accel'])
-    R['gear'] = shift_gears(S)
-    return
+    # ── ABS ──────────────────────────────────────────────────
+    if R['brake'] > 0 and speed > 15:
+        expected_spin = (speed / 3.6) / 0.33
+        actual_front = (wheels[0] + wheels[1]) / 2
+        if expected_spin > 1 and actual_front < expected_spin * 0.65:
+            R['brake'] *= 0.75
+
+    # ── TRACTION CONTROL ─────────────────────────────────────
+    if R['accel'] > 0:
+        rear_avg = (wheels[2] + wheels[3]) / 2
+        front_avg = (wheels[0] + wheels[1]) / 2
+        if rear_avg > front_avg + 8:
+            R['accel'] = max(0.0, R['accel'] - 0.2)
+
+    # ── GEAR SHIFTING  ────────────────
+    if gear < 1:
+        gear = 1
+    if rpm > 7600 and gear < 6:
+        gear += 1
+    elif rpm < 3500 and gear > 1:
+        gear -= 1
+    R['gear'] = gear
+
+    # ── STUCK RECOVERY ───────────────────────────────────────
+    stuck = S.get('stucktimer', 0) or 0
+    if stuck > 60:
+        R['gear'] = -1
+        R['accel'] = 0.6
+        R['brake'] = 0.0
+        R['steer'] = -R['steer']
+
 
 if __name__ == "__main__":
-    C= Client(p=3001)
-    for step in range(C.maxSteps,0,-1):
+    C = Client(p=3001)
+    for step in range(C.maxSteps, 0, -1):
         C.get_servers_input()
-        drive_modular(C)
+        drive(C)
         C.respond_to_server()
     C.shutdown()
