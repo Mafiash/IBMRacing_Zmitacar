@@ -1,1 +1,1 @@
-Program written to achieve best results for IBM Ai Rcing League.
+Program written to achieve best results for IBM Ai Racing League.
